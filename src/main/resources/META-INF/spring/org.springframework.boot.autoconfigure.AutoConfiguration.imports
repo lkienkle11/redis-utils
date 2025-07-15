@@ -1,1 +1,2 @@
 com.microservices.config.RedisUtilsAutoConfiguration
+com.microservices.config.RedisListenerAutoConfiguration

@@ -15,7 +15,8 @@ public class RedisUtilsAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     public RedisUtils redisUtils(
-            org.springframework.data.redis.core.RedisTemplate<String, Object> redisTemplate) {
-        return new RedisUtils(redisTemplate);
+            org.springframework.data.redis.core.RedisTemplate<String, Object> redisTemplate,
+            org.springframework.data.redis.listener.RedisMessageListenerContainer listenerContainer) {
+        return new RedisUtils(redisTemplate, listenerContainer);
     }
 }
