@@ -13,6 +13,7 @@ import org.springframework.data.redis.listener.PatternTopic;
 import org.springframework.data.redis.listener.RedisMessageListenerContainer;
 import org.springframework.data.redis.serializer.RedisSerializer;
 import org.springframework.data.util.Pair;
+import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Component;
 
 import java.util.Collections;
@@ -34,7 +35,7 @@ public class RedisUtils {
     ObjectMapper objectMapper;
 
     public RedisUtils(RedisTemplate<String, Object> redisTemplate,
-                      RedisMessageListenerContainer listenerContainer) {
+                      @Nullable RedisMessageListenerContainer listenerContainer) {
         this.redisTemplate = redisTemplate;
         this.listenerContainer = listenerContainer;
         this.objectMapper = new ObjectMapper();
@@ -170,6 +171,9 @@ public class RedisUtils {
     }
 
     public void subscribe(String channel, Consumer<String> handler) {
+        if (listenerContainer == null) {
+            throw new IllegalStateException("RedisMessageListenerContainer is not configured");
+        }
         MessageListener listener = (message, pattern) -> {
             Object raw = redisTemplate.getValueSerializer().deserialize(message.getBody());
             String body;

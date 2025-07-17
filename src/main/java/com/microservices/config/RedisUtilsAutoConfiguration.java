@@ -1,6 +1,7 @@
 package com.microservices.config;
 
 import com.microservices.utils.RedisUtils;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -16,7 +17,8 @@ public class RedisUtilsAutoConfiguration {
     @ConditionalOnMissingBean
     public RedisUtils redisUtils(
             org.springframework.data.redis.core.RedisTemplate<String, Object> redisTemplate,
-            org.springframework.data.redis.listener.RedisMessageListenerContainer listenerContainer) {
-        return new RedisUtils(redisTemplate, listenerContainer);
+            ObjectProvider<org.springframework.data.redis.listener.RedisMessageListenerContainer>
+                    lcProvider) {
+        return new RedisUtils(redisTemplate, lcProvider.getIfAvailable());
     }
 }
