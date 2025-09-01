@@ -4,11 +4,14 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.microservices.model.MessageData;
 import lombok.Getter;
 import lombok.experimental.FieldDefaults;
 import org.springframework.data.redis.connection.MessageListener;
+import org.springframework.data.redis.core.Cursor;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.data.redis.listener.PatternTopic;
 import org.springframework.data.redis.listener.RedisMessageListenerContainer;
 import org.springframework.data.redis.serializer.RedisSerializer;
@@ -16,10 +19,8 @@ import org.springframework.data.util.Pair;
 import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Component;
 
-import java.util.Collections;
-import java.util.List;
-import java.util.Objects;
-import java.util.Set;
+import java.io.IOException;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -33,6 +34,11 @@ public class RedisUtils {
     RedisMessageListenerContainer listenerContainer;
 
     ObjectMapper objectMapper;
+
+    private static final int SCAN_COUNT = 1_000;  // mỗi vòng SCAN lấy tối đa ~1000 keys
+    private static final int DEL_BATCH  = 1_000;  // xoá theo lô 1000 keys/lần
+
+    public static final String REMOVE_KEY_MESSAGE_PREFIX = "cacheRemove::";
 
     public RedisUtils(RedisTemplate<String, Object> redisTemplate,
                       @Nullable RedisMessageListenerContainer listenerContainer) {
@@ -117,6 +123,92 @@ public class RedisUtils {
         redisTemplate.delete(Objects.requireNonNull(redisTemplate.keys(pattern)));
     }
 
+    public void deleteKeysWithPatternScan(String pattern) {
+        redisTemplate.execute((RedisCallback<Void>) connection -> {
+            ScanOptions options = ScanOptions.scanOptions()
+                    .match(pattern)
+                    .count(SCAN_COUNT)
+                    .build();
+
+            try (Cursor<byte[]> cursor = connection.scan(options)) {
+                List<byte[]> batch = new ArrayList<>(DEL_BATCH);
+                while (cursor.hasNext()) {
+                    batch.add(cursor.next());
+                    if (batch.size() >= DEL_BATCH) {
+                        // Spring Data Redis 3.x: dùng keyCommands().del(...)
+                        connection.keyCommands().del(batch.toArray(new byte[0][]));
+                        batch.clear();
+                    }
+                }
+                if (!batch.isEmpty()) {
+                    connection.keyCommands().del(batch.toArray(new byte[0][]));
+                }
+            }
+            return null;
+        });
+    }
+
+    /** (Tuỳ chọn) Xoá non-blocking ở Redis side: UNLINK thay cho DEL */
+    public void unlinkKeysWithPatternScan(String pattern) {
+        redisTemplate.execute((RedisCallback<Void>) connection -> {
+            ScanOptions options = ScanOptions.scanOptions()
+                    .match(pattern)
+                    .count(SCAN_COUNT)
+                    .build();
+
+            try (Cursor<byte[]> cursor = connection.scan(options)) {
+                List<byte[]> batch = new ArrayList<>(DEL_BATCH);
+                while (cursor.hasNext()) {
+                    batch.add(cursor.next());
+                    if (batch.size() >= DEL_BATCH) {
+                        connection.keyCommands().unlink(batch.toArray(new byte[0][]));
+                        batch.clear();
+                    }
+                }
+                if (!batch.isEmpty()) {
+                    connection.keyCommands().unlink(batch.toArray(new byte[0][]));
+                }
+            }
+            return null;
+        });
+    }
+
+
+    public void deleteAndPublishInvalidateCache(String localCacheName, String key) {
+        redisTemplate.delete(key);
+        publish(REMOVE_KEY_MESSAGE_PREFIX + localCacheName, key);
+    }
+
+    public void deleteAndPublishInvalidateCacheWithPattern(String localCacheName, String pattern) {
+        Set<String> keys = redisTemplate.keys(pattern);
+        if (!keys.isEmpty()) {
+            redisTemplate.delete(keys);
+            publishes(keys.stream()
+                    .map(k -> MessageData.builder()
+                            .channel(REMOVE_KEY_MESSAGE_PREFIX + localCacheName)
+                            .message(k)
+                            .build())
+                    .toList());
+        }
+    }
+
+    public void deleteAndPublishInvalidateCache(String localCacheName, String key, MessageData customMessage) {
+        redisTemplate.delete(key);
+        publish(REMOVE_KEY_MESSAGE_PREFIX + localCacheName, customMessage);
+    }
+
+    public void deleteAndPublishInvalidateCacheWithPattern(String pattern, List<MessageData> customMessages) {
+        deleteKeysWithPattern(pattern);
+        if (customMessages == null || customMessages.isEmpty()) return;
+        publishes(customMessages);
+    }
+
+    public void deleteAndPublishInvalidateCacheWithPattern(String localCacheName, String pattern, List<Object> customMessages) {
+        deleteKeysWithPattern(pattern);
+        if (customMessages == null || customMessages.isEmpty()) return;
+        publishes(REMOVE_KEY_MESSAGE_PREFIX + localCacheName, customMessages);
+    }
+
     public List<Object> multiGet(List<String> keys) {
         return redisTemplate.opsForValue().multiGet(keys);
     }
@@ -126,19 +218,16 @@ public class RedisUtils {
     }
 
     @SuppressWarnings("unchecked")
-    public void publishes(List<Pair<String, Object>> dataMessages) {
+    public void publishes(List<MessageData> dataMessages) {
         if (dataMessages == null || dataMessages.isEmpty()) return;
 
         redisTemplate.executePipelined((RedisCallback<Object>) connection -> {
             var keySer = redisTemplate.getStringSerializer();
             var valueSer = (RedisSerializer<Object>) redisTemplate.getValueSerializer();
 
-            for (Pair<String, Object> pair : dataMessages) {
-                String channel = pair.getFirst();
-                Object message = pair.getSecond();
-
-                byte[] rawChannel = keySer.serialize(channel);
-                byte[] rawMsg = valueSer.serialize(message);
+            for (MessageData pair : dataMessages) {
+                byte[] rawChannel = keySer.serialize(pair.getChannel());
+                byte[] rawMsg = valueSer.serialize(pair.getMessage());
                 if (rawChannel == null || rawMsg == null) {
                     continue;
                 }
